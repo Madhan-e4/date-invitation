@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>First Date ❤️</title>
+  <title>Will you go out on a date with me? ❤️</title>
   <style>
     /* ── Reset & base ─────────────────────────────────────────── */
     *, *::before, *::after {
@@ -106,26 +106,27 @@
     /* ── Button area ──────────────────────────────────────────── */
     .buttons {
       display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      gap: clamp(0.65rem, 2vw, 1rem);
       justify-content: center;
       align-items: center;
       width: 100%;
-      max-width: 600px;
-      min-height: 120px;
+      max-width: 720px;
       position: relative;
     }
 
-    /* Wrapper for dodge buttons — positioned absolutely when dodging */
+    /* Wrapper for dodge buttons — stays in flow until desktop hover */
     .btn-wrapper {
       position: relative;
-      transition: left 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
-                  top 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+      flex-shrink: 0;
     }
 
     .btn-wrapper.dodging {
       position: fixed;
       z-index: 10;
+      transition: left 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+                  top 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
 
     .btn-wrapper.dodging button {
@@ -254,15 +255,23 @@
     }
 
     /* ── Mobile tweaks ────────────────────────────────────────── */
-    @media (max-width: 480px) {
+    @media (max-width: 640px) {
+      h1 {
+        margin-bottom: 2rem;
+      }
+
       .buttons {
-        flex-direction: column;
-        gap: 0.85rem;
+        flex-wrap: wrap;
+        gap: 0.75rem;
       }
 
       button {
-        width: 100%;
-        max-width: 280px;
+        font-size: 0.95rem;
+        padding: 0.75rem 1.25rem;
+      }
+
+      .btn-wide {
+        max-width: 100%;
       }
     }
   </style>
@@ -277,7 +286,7 @@
 
   <!-- ── Page 1 ─────────────────────────────────────────────── -->
   <section class="page active" id="page1">
-    <h1>Will you go out on a date with me doctor? ❤️</h1>
+    <h1>Will you go out on a date with me? ❤️</h1>
     <div class="buttons" id="buttons1">
       <button class="btn-yes" id="btnYes">Yes 💖</button>
       <div class="btn-wrapper" id="wrapNo">
@@ -324,87 +333,127 @@
   <script>
     /* ───────────────────────────────────────────────────────────
        DODGE BUTTON LOGIC
-       Runaway buttons use position:fixed and relocate on any
-       interaction attempt. Desktop dodges on hover; mobile
-       dodges instantly on touch and wanders every 1.5–2 s.
+       Desktop: dodge on hover. Mobile: dodge on touch + periodic
+       wander. All dodges use collision detection to avoid overlap,
+       stay below the question, and remain on-screen.
     ─────────────────────────────────────────────────────────── */
 
-    const isTouchDevice =
-      window.matchMedia('(pointer: coarse)').matches ||
-      'ontouchstart' in window;
+    const isDesktopDodge = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
     const dodgeRegistry = [];
     let mobileWanderTimer = null;
+    const BUTTON_GAP = 16;
+    const VIEWPORT_MARGIN = 16;
 
-    /** Keep a fixed element fully inside the viewport */
-    function clampPosition(x, y, el) {
-      const margin = 16;
-      const w = el.offsetWidth;
-      const h = el.offsetHeight;
+    function getPageElement(pageId) {
+      return document.getElementById(pageId);
+    }
+
+    /** Safe zone: below the question, above the bottom edge */
+    function getSafeZone(pageId) {
+      const page = getPageElement(pageId);
+      const h1 = page.querySelector('h1');
+      const questionBottom = h1.getBoundingClientRect().bottom + 32;
+
       return {
-        x: Math.max(margin, Math.min(x, window.innerWidth  - w - margin)),
-        y: Math.max(margin, Math.min(y, window.innerHeight - h - margin)),
+        top: questionBottom,
+        bottom: window.innerHeight - VIEWPORT_MARGIN,
+        left: VIEWPORT_MARGIN,
+        right: window.innerWidth - VIEWPORT_MARGIN,
       };
     }
 
-    /** Fully random position anywhere in the viewport */
-    function randomPosition(el) {
-      const margin = 16;
+    function clampToZone(x, y, el, zone) {
       const w = el.offsetWidth;
       const h = el.offsetHeight;
-      const maxX = window.innerWidth  - w - margin;
-      const maxY = window.innerHeight - h - margin;
       return {
-        x: margin + Math.random() * Math.max(0, maxX - margin),
-        y: margin + Math.random() * Math.max(0, maxY - margin),
+        x: Math.max(zone.left, Math.min(x, zone.right - w)),
+        y: Math.max(zone.top,  Math.min(y, zone.bottom - h)),
       };
     }
 
-    /** Small nudge from the current spot — used for mobile wander */
-    function slightOffset(x, y, el) {
-      const dx = (Math.random() - 0.5) * 140;
-      const dy = (Math.random() - 0.5) * 140;
-      return clampPosition(x + dx, y + dy, el);
+    function rectsOverlap(a, b, gap) {
+      return !(
+        a.right + gap < b.left ||
+        a.left > b.right + gap ||
+        a.bottom + gap < b.top ||
+        a.top > b.bottom + gap
+      );
     }
 
-    /**
-     * Attaches runaway behavior to a wrapper + button pair.
-     * Movement happens on hover/touch approach only.
-     * Click/tap activation is fully blocked — no state changes.
-     */
+    /** Collect rects of other buttons that must not be covered */
+    function getObstacleRects(pageId, selfWrapper) {
+      const page = getPageElement(pageId);
+      const obstacles = [];
+
+      dodgeRegistry
+        .filter((d) => d.pageId === pageId && d.wrapper.classList.contains('dodging') && d.wrapper !== selfWrapper)
+        .forEach((d) => obstacles.push(d.wrapper.getBoundingClientRect()));
+
+      page.querySelectorAll('.btn-yes').forEach((btn) => {
+        obstacles.push(btn.getBoundingClientRect());
+      });
+
+      return obstacles;
+    }
+
+    /** Find a random position in the safe zone that avoids all obstacles */
+    function findClearPosition(wrapper, button, pageId) {
+      const zone = getSafeZone(pageId);
+      const w = button.offsetWidth;
+      const h = button.offsetHeight;
+      const obstacles = getObstacleRects(pageId, wrapper);
+
+      const maxX = zone.right - w;
+      const maxY = zone.bottom - h;
+      if (maxX < zone.left || maxY < zone.top) {
+        return clampToZone(zone.left, zone.top, button, zone);
+      }
+
+      for (let i = 0; i < 60; i++) {
+        const x = zone.left + Math.random() * (maxX - zone.left);
+        const y = zone.top  + Math.random() * (maxY - zone.top);
+        const candidate = { left: x, top: y, right: x + w, bottom: y + h };
+
+        if (!obstacles.some((obs) => rectsOverlap(candidate, obs, BUTTON_GAP))) {
+          return { x, y };
+        }
+      }
+
+      // Fallback: stack below the question, offset horizontally
+      const index = dodgeRegistry.filter((d) => d.pageId === pageId && d.wrapper.classList.contains('dodging')).length;
+      return clampToZone(
+        zone.left + index * (w + BUTTON_GAP),
+        zone.top,
+        button,
+        zone
+      );
+    }
+
     function makeDodgeButton(wrapper, button, pageId) {
-      let posX = 0;
-      let posY = 0;
       let lastDodge = 0;
 
-      /** Hard block — runaway buttons must never activate */
       function blockAction(e) {
         e.preventDefault();
         e.stopPropagation();
         return false;
       }
 
-      function readPosition() {
-        posX = parseFloat(wrapper.style.left) || 0;
-        posY = parseFloat(wrapper.style.top)  || 0;
-      }
-
-      /** Switch wrapper to position:fixed at its current screen coords */
       function pinFixed() {
         if (wrapper.classList.contains('dodging')) return;
-
         const rect = button.getBoundingClientRect();
         wrapper.classList.add('dodging');
         wrapper.style.left = rect.left + 'px';
         wrapper.style.top  = rect.top  + 'px';
-        posX = rect.left;
-        posY = rect.top;
       }
 
-      /** Move to x/y; immediate=true skips CSS transition (mobile touch) */
-      function moveTo(x, y, immediate) {
+      function dodge(immediate) {
+        const now = Date.now();
+        if (now - lastDodge < 80) return;
+        lastDodge = now;
+
         pinFixed();
-        const pos = clampPosition(x, y, button);
+        const pos = findClearPosition(wrapper, button, pageId);
 
         if (immediate) {
           wrapper.style.transition = 'none';
@@ -416,67 +465,52 @@
           wrapper.style.left = pos.x + 'px';
           wrapper.style.top  = pos.y + 'px';
         }
-
-        posX = pos.x;
-        posY = pos.y;
       }
 
-      /** Jump to a brand-new random spot — movement only, no side effects */
-      function dodge(immediate) {
-        const now = Date.now();
-        if (now - lastDodge < 60) return;
-        lastDodge = now;
-
-        const pos = randomPosition(button);
-        moveTo(pos.x, pos.y, immediate);
+      // Desktop — dodge on hover
+      if (isDesktopDodge) {
+        button.addEventListener('mouseenter', () => dodge(false));
       }
 
-      /** Nudge slightly — mobile periodic wander */
-      function wander() {
-        if (!wrapper.classList.contains('dodging')) return;
-        readPosition();
-        const pos = slightOffset(posX, posY, button);
-        moveTo(pos.x, pos.y, false);
-      }
-
-      // ── Movement only (hover / touch approach) ──
-      button.addEventListener('mouseenter', () => {
-        if (!isTouchDevice) dodge(false);
-      });
-
-      button.addEventListener('pointerenter', (e) => {
-        if (e.pointerType === 'mouse') dodge(false);
-      });
-
+      // Mobile — dodge instantly before tap registers
       button.addEventListener('touchstart', (e) => {
         dodge(true);
-        blockAction(e);
+        e.preventDefault();
+        e.stopPropagation();
       }, { passive: false });
 
-      // ── Activation blockers — never advance, alert, or change state ──
+      // Block activation — never advance the flow
       ['click', 'touchend', 'touchcancel', 'mousedown', 'mouseup', 'pointerup'].forEach((evt) => {
         button.addEventListener(evt, blockAction, true);
       });
 
       button.addEventListener('contextmenu', blockAction);
 
-      const entry = { wrapper, button, pageId, pinFixed, wander };
+      const entry = { wrapper, button, pageId, reset, dodge };
       dodgeRegistry.push(entry);
       return entry;
+
+      function reset() {
+        wrapper.classList.remove('dodging');
+        wrapper.style.left = '';
+        wrapper.style.top  = '';
+      }
     }
 
-    /** Pin all runaway buttons on a page to fixed positions */
-    function activateDodgeButtons(pageId) {
-      requestAnimationFrame(() => {
-        dodgeRegistry
-          .filter((d) => d.pageId === pageId)
-          .forEach((d) => d.pinFixed());
-      });
+    function resetPageDodgeButtons(pageId) {
+      dodgeRegistry
+        .filter((d) => d.pageId === pageId)
+        .forEach((d) => d.reset());
     }
 
-    /** Mobile only — nudge visible runaway buttons every 1.5–2 s */
+    makeDodgeButton(document.getElementById('wrapNo'),       document.getElementById('btnNo'),       'page1');
+    makeDodgeButton(document.getElementById('wrapMaybe'),     document.getElementById('btnMaybe'),     'page1');
+    makeDodgeButton(document.getElementById('wrapSomewhat'), document.getElementById('btnSomewhat'), 'page2');
+    makeDodgeButton(document.getElementById('wrapExcited'),  document.getElementById('btnExcited'),  'page2');
+
+    /** Mobile — nudge visible runaway buttons every 1.5–2 s */
     function scheduleMobileWander() {
-      if (!isTouchDevice) return;
+      if (isDesktopDodge) return;
       if (mobileWanderTimer) clearTimeout(mobileWanderTimer);
 
       const delay = 1500 + Math.random() * 500;
@@ -485,18 +519,12 @@
         if (activePage) {
           dodgeRegistry
             .filter((d) => activePage.contains(d.wrapper))
-            .forEach((d) => d.wander());
+            .forEach((d) => d.dodge(false));
         }
         scheduleMobileWander();
       }, delay);
     }
 
-    makeDodgeButton(document.getElementById('wrapNo'),       document.getElementById('btnNo'),       'page1');
-    makeDodgeButton(document.getElementById('wrapMaybe'),     document.getElementById('btnMaybe'),     'page1');
-    makeDodgeButton(document.getElementById('wrapSomewhat'), document.getElementById('btnSomewhat'), 'page2');
-    makeDodgeButton(document.getElementById('wrapExcited'),  document.getElementById('btnExcited'),  'page2');
-
-    activateDodgeButtons('page1');
     scheduleMobileWander();
 
     window.addEventListener('resize', () => {
@@ -504,7 +532,8 @@
         if (!d.wrapper.classList.contains('dodging')) return;
         const x = parseFloat(d.wrapper.style.left) || 0;
         const y = parseFloat(d.wrapper.style.top)  || 0;
-        const pos = clampPosition(x, y, d.button);
+        const zone = getSafeZone(d.pageId);
+        const pos = clampToZone(x, y, d.button, zone);
         d.wrapper.style.left = pos.x + 'px';
         d.wrapper.style.top  = pos.y + 'px';
       });
@@ -524,7 +553,7 @@
       setTimeout(() => {
         from.classList.remove('exit');
         to.classList.add('active');
-        activateDodgeButtons(toId);
+        resetPageDodgeButtons(fromId);
       }, 600);
     }
 
